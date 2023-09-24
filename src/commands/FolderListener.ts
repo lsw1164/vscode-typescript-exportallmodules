@@ -3,13 +3,10 @@ import * as path from "path";
 import { ExportAll } from ".";
 import { EXTENSION_KEY, CONFIG_FOLDERS } from "../constants";
 import { ExportFolder } from "../providers";
-import {
-  getRelativeFolderPath,
-  getAbsoluteFolderPath,
-  parseWinPath,
-  clearWildcard,
-} from "../helpers";
+import { getRelativeFolderPath } from "../helpers";
 import { Uri } from "vscode";
+import { glob } from "glob";
+import { promises as fs } from "fs";
 
 export class FolderListener {
   private static watchers: { [path: string]: vscode.FileSystemWatcher } = {};
@@ -19,10 +16,8 @@ export class FolderListener {
    * @param uri
    */
   public static async add(uri: vscode.Uri) {
-    let relativePath = getRelativeFolderPath(uri.fsPath);
-    let options = this.getFolders();
-    options.push(relativePath);
-    options = [...new Set(options)];
+    const relativePath = getRelativeFolderPath(uri.fsPath);
+    const options = [...new Set([...this.getFolders(), relativePath])];
     await this.updateFolders(options);
     this.startListener();
   }
@@ -46,44 +41,29 @@ export class FolderListener {
    * Start the listener
    */
   public static async startListener() {
-    const folderListener: string[] | undefined = vscode.workspace
-      .getConfiguration(EXTENSION_KEY)
-      .get(CONFIG_FOLDERS);
+    const folderListener: string[] =
+      vscode.workspace.getConfiguration(EXTENSION_KEY).get(CONFIG_FOLDERS) ??
+      [];
 
     // Dispose all the current watchers
-    const paths = Object.keys(this.watchers);
-    for (const path of paths) {
-      const watcher = this.watchers[path];
-      watcher.dispose();
-      delete this.watchers[path];
-    }
+    this.clearWatchers();
 
     // Recreate all the watchers
-    if (folderListener) {
-      for (const folder of folderListener) {
-        let absFolder = getAbsoluteFolderPath(folder);
+    if (folderListener.length === 0) {
+      return;
+    }
 
-        const hasGlobPattern = parseWinPath(absFolder).includes("**");
-        const globPattern = hasGlobPattern ? "**/*" : "*";
+    const directories = await this.globDirectories(folderListener);
 
-        absFolder = clearWildcard(absFolder);
-        const folderUri = vscode.Uri.file(absFolder);
-
-        let watcher = vscode.workspace.createFileSystemWatcher(
-          new vscode.RelativePattern(absFolder, globPattern)
-        );
-
-        watcher.onDidDelete(async (uri: vscode.Uri) =>
-          this.listener(folderUri, uri)
-        );
-        watcher.onDidCreate(async (uri: vscode.Uri) =>
-          this.listener(folderUri, uri)
-        );
-        watcher.onDidChange(async (uri: vscode.Uri) =>
-          this.listener(folderUri, uri)
-        );
-        this.watchers[folderUri.fsPath] = watcher;
-      }
+    for (const dir of directories) {
+      const dirUri = vscode.Uri.file(dir);
+      const watcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(dirUri, "*")
+      );
+      watcher.onDidDelete(this.listener);
+      watcher.onDidCreate(this.listener);
+      watcher.onDidChange(this.listener);
+      this.watchers[dirUri.fsPath] = watcher;
     }
   }
 
@@ -91,7 +71,7 @@ export class FolderListener {
    * Listener logic
    * @param uri
    */
-  private static async listener(folderUri: vscode.Uri, uri: vscode.Uri) {
+  private static async listener(uri: vscode.Uri) {
     if (!this.isIndexFile(uri)) {
       const folderPath = Uri.file(path.dirname(uri.fsPath));
       await ExportAll.start(folderPath);
@@ -102,11 +82,8 @@ export class FolderListener {
    * Get the current set folders
    */
   private static getFolders() {
-    let config = vscode.workspace.getConfiguration(EXTENSION_KEY);
-    let options: string[] | undefined = config.get(CONFIG_FOLDERS);
-    if (!options) {
-      options = [];
-    }
+    const config = vscode.workspace.getConfiguration(EXTENSION_KEY);
+    const options: string[] = config.get(CONFIG_FOLDERS) ?? [];
     return options;
   }
 
@@ -124,5 +101,32 @@ export class FolderListener {
    */
   private static isIndexFile(uri: vscode.Uri) {
     return uri.fsPath.toLowerCase().endsWith("index.ts");
+  }
+
+  private static async globDirectories(
+    folderListener: string[]
+  ): Promise<string[]> {
+    const globPathList = await glob(folderListener, {
+      absolute: false,
+      ignore: "**/node_modules/**",
+      nodir: false,
+    });
+
+    const directories = (
+      await Promise.all(
+        globPathList.map(async (globPath) =>
+          (await fs.lstat(globPath)).isDirectory() ? globPath : ""
+        )
+      )
+    ).filter((dir) => dir);
+
+    return directories;
+  }
+
+  private static clearWatchers() {
+    for (const path of Object.keys(this.watchers)) {
+      this.watchers[path]?.dispose();
+    }
+    this.watchers = {};
   }
 }
