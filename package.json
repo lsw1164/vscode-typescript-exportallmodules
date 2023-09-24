@@ -209,7 +209,10 @@
 		"@types/vscode": "^1.64.0",
 		"date-fns": "^2.30.0",
 		"esbuild": "^0.19.2",
-		"tslint": "^5.20.1",
-		"typescript": "^3.9.3"
+		"eslint": "^8.50.0",
+		"typescript": "^5.2.2"
+	},
+	"dependencies": {
+		"glob": "^10.3.6"
 	}
 }
